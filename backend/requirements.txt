@@ -1,0 +1,28 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-dotenv>=1.0.1
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+python-multipart>=0.0.12
+
+# Supabase
+supabase>=2.10.0
+
+# Auth (JWT JWKS verification)
+python-jose[cryptography]>=3.3.0
+
+# Gemini SDK
+google-genai>=0.8.0
+
+# HTTP client (URL ingestion + JWKS fetch)
+httpx>=0.27.0
+
+# Source ingestion
+pypdf>=5.1.0
+python-docx>=1.1.2
+trafilatura>=1.12.2
+youtube-transcript-api>=0.6.3
+
+# Utilities
+tenacity>=9.0.0
+aiofiles>=24.1.0
