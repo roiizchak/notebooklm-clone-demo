@@ -35,6 +35,16 @@ class Settings(BaseSettings):
         description="Max successful + in-flight research reports per user per 24h",
     )
 
+    # Per-user daily caps on paid Gemini endpoints (F1 cost guardrail).
+    chat_daily_limit_per_user: int = Field(
+        default=300,
+        description="Max chat (mode='chat') generations per user per 24h",
+    )
+    studies_daily_limit_per_user: int = Field(
+        default=50,
+        description="Max study-material generations per user per 24h",
+    )
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

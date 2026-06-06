@@ -13,11 +13,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.config import get_settings
 from app.services.audio import _gather_context  # reuse chunk aggregator
 from app.services.auth import AuthUser, get_current_user
 from app.services.gemini import STUDY_MODEL, get_gemini
 from app.services.supabase_client import get_supabase
-from app.services.usage import log_usage
+from app.services.usage import count_operations_24h, log_usage
+
+# usage_logs operation_type values written per study kind (see log_usage call below).
+_STUDY_OP_TYPES = ["study_flashcards", "study_quiz", "study_guide", "study_faq"]
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -74,6 +78,16 @@ async def generate_study(
 ) -> dict:
     notebook_id = str(notebook_id)
     _verify_notebook_owned(notebook_id, user.user_id)
+
+    # F1: per-user daily cap on paid study generations (best-effort guardrail).
+    if (
+        count_operations_24h(user.user_id, _STUDY_OP_TYPES)
+        >= get_settings().studies_daily_limit_per_user
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Daily study-generation limit reached. Try again later.",
+        )
 
     ctx = _gather_context(notebook_id)
     if not ctx.text.strip():

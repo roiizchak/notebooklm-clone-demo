@@ -22,7 +22,7 @@ from app.services import rag, research
 from app.services.auth import AuthUser, get_current_user
 from app.services.gemini import CHAT_DEFAULT, SUMMARY_MODEL, get_gemini
 from app.services.supabase_client import get_supabase
-from app.services.usage import log_usage
+from app.services.usage import count_operations_24h, log_usage
 
 log = logging.getLogger(__name__)
 
@@ -313,7 +313,7 @@ async def chat(
     session = _get_session_or_create(notebook_id, payload.session_id)
 
     # Phase 3.a: deep research branch. Returns 202 + ResearchCreateAck and
-    # does not touch the RAG pipeline below.
+    # does not touch the RAG pipeline below. (Research has its own 24h cap.)
     if payload.mode == "research":
         return _research_branch(
             notebook_id=notebook_id,
@@ -321,6 +321,17 @@ async def chat(
             payload=payload,
             background=background,
             user=user,
+        )
+
+    # F1: per-user daily cap on paid chat generations (best-effort guardrail).
+    settings = get_settings()
+    if (
+        count_operations_24h(user.user_id, ["chat"])
+        >= settings.chat_daily_limit_per_user
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Daily chat limit reached. Try again later.",
         )
 
     is_new_session = session.get("title") is None
@@ -482,5 +493,10 @@ def delete_session(
     )
     if not sess.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
-    sb.table("chat_sessions").delete().eq("id", session_id).eq("user_id", user.user_id).execute()
+    # F7: chat_sessions has no user_id column (migration 004); ownership flows
+    # via notebook_id -> notebooks.user_id, already verified above. The old
+    # .eq("user_id", ...) filter targeted a nonexistent column.
+    sb.table("chat_sessions").delete().eq("id", session_id).eq(
+        "notebook_id", notebook_id
+    ).execute()
     return None

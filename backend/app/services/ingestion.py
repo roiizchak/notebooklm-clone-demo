@@ -147,32 +147,59 @@ def _is_safe_url_target(url: str) -> bool:
     return True
 
 
+_URL_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (compatible; NotebookLM-Reimagined/0.1; +https://example.com)"
+    )
+}
+_MAX_URL_REDIRECTS = 3
+
+
+def _fetch_url_with_safe_redirects(url: str) -> tuple[str, str]:
+    """Fetch `url`, re-validating EVERY redirect hop against the SSRF guard.
+
+    httpx's built-in `follow_redirects=True` only validates the initial URL, so
+    a public URL that 302-redirects to a private/loopback/link-local host (or
+    cloud metadata) would bypass `_is_safe_url_target`. We follow manually with
+    redirects disabled and re-check each hop's resolved IPs before requesting it.
+
+    Relative `Location` headers are resolved against the current URL. Hops are
+    capped at `_MAX_URL_REDIRECTS`. `http2=False` is preserved (CLAUDE.md note 4
+    — the sync HTTP/2 multiplexer can hit WinError 10035 under load on Windows).
+
+    Returns (final_url, response_text).
+    """
+    current = url
+    with httpx.Client(
+        timeout=15.0,
+        follow_redirects=False,
+        http2=False,
+    ) as client:
+        for _ in range(_MAX_URL_REDIRECTS + 1):
+            if not _is_safe_url_target(current):
+                raise ValueError("URL host not allowed")
+            resp = client.get(current, headers=_URL_FETCH_HEADERS)
+            if resp.is_redirect:
+                location = resp.headers.get("location")
+                if not location:
+                    raise ValueError("Redirect without Location header")
+                # Resolve relative redirects against the URL we just requested.
+                current = str(httpx.URL(current).join(location))
+                continue
+            resp.raise_for_status()
+            return current, resp.text
+    raise ValueError("Too many redirects")
+
+
 def extract_url(url: str) -> list[TextBlock]:
     if not _is_safe_url_target(url):
         raise ValueError("URL host not allowed")
 
     import trafilatura
 
-    # http2=False: the sync httpx HTTP/2 multiplexer can hit WinError 10035
-    # under concurrent loads on Windows. HTTP/1.1 is sufficient here.
-    with httpx.Client(
-        timeout=15.0,
-        follow_redirects=True,
-        max_redirects=3,
-        http2=False,
-    ) as client:
-        resp = client.get(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; NotebookLM-Reimagined/0.1; +https://example.com)"
-                )
-            },
-        )
-        resp.raise_for_status()
-        html = resp.text
+    final_url, html = _fetch_url_with_safe_redirects(url)
 
-    extracted = trafilatura.extract(html, url=url, favor_recall=True) or ""
+    extracted = trafilatura.extract(html, url=final_url, favor_recall=True) or ""
     text = extracted.strip()
     if not text:
         raise ValueError("URL contained no extractable text")

@@ -67,6 +67,23 @@ def _source_type_for_mime(mime: str) -> str | None:
     return None
 
 
+def _content_matches_declared_type(source_type: str, head: bytes) -> bool:
+    """F6a: verify magic bytes match the client-declared type.
+
+    upload-init only checks the *declared* MIME; the file goes straight to
+    Storage so the API never sniffs the real bytes. This catches a mismatch at
+    ingest (e.g. an executable/HTML uploaded as application/pdf). Stdlib only —
+    no python-magic (libmagic is unavailable on the Vercel runtime).
+    """
+    if source_type == "pdf":
+        return head[:5] == b"%PDF-"
+    if source_type == "docx":
+        # DOCX is a ZIP container → ZIP local-file-header magic.
+        return head[:4] == b"PK\x03\x04"
+    # Text is validated separately via utf-8 decode; nothing to sniff.
+    return True
+
+
 def _verify_notebook_owned(notebook_id: str, user_id: str) -> None:
     sb = get_supabase()
     res = (
@@ -240,6 +257,13 @@ def _ingest_and_finalize(
                 log.exception("failed to fetch source bytes from storage: %s", storage_path)
                 _mark_failed(source_id, f"storage download failed: {e}")
                 return
+            # F6a: sniff magic bytes against the declared type before extraction.
+            if not _content_matches_declared_type(source_type, bytes_to_use[:8]):
+                log.warning(
+                    "content/type mismatch source_id=%s declared=%s", source_id, source_type
+                )
+                _mark_failed(source_id, "file content does not match declared type")
+                return
             # Text uploads are stored as raw .txt; the ingestion pipeline
             # expects payload["content"] for text type, not file_bytes.
             if source_type == "text":
@@ -342,13 +366,15 @@ def upload_init(
     storage_path = f"{user.user_id}/{notebook_id}/{row['id']}/{original_filename}"
     try:
         signed = create_signed_upload_url(SOURCES_BUCKET, storage_path)
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         # Roll back the empty row so it doesn't pollute the source list.
+        log.exception("upload-init: could not issue signed URL for %s", storage_path)
         try:
             get_supabase().table("sources").delete().eq("id", row["id"]).execute()
         except Exception:  # noqa: BLE001
             pass
-        raise HTTPException(status_code=500, detail=f"Could not issue signed URL: {e}")
+        # Generic message — do not leak internal exception text to the client (F4).
+        raise HTTPException(status_code=500, detail="Could not issue upload URL")
 
     # Persist storage_path on the row so upload-complete can locate it.
     get_supabase().table("sources").update({"file_path": storage_path}).eq(

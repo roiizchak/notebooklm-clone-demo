@@ -8,6 +8,7 @@ write must never break a user-facing request.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -15,6 +16,35 @@ from app.services.gemini import Usage
 from app.services.supabase_client import get_supabase
 
 log = logging.getLogger(__name__)
+
+
+def count_operations_24h(user_id: str, operation_types: list[str]) -> int:
+    """Count this user's usage_logs rows of the given operation types in the
+    last 24h. Backs the per-user daily caps on paid Gemini endpoints (F1).
+
+    Best-effort cost guardrail, NOT atomic: log_usage writes occur *after* the
+    Gemini call, so concurrent bursts within one window can all pass the
+    pre-check (TOCTOU). True atomic limiting would need Redis / advisory locks,
+    which this Vercel-serverless architecture deliberately avoids.
+
+    Uses the existing idx_usage_logs_user_id + idx_usage_logs_created_at indexes.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    res = (
+        get_supabase()
+        .table("usage_logs")
+        .select("id", count="exact")
+        .eq("user_id", user_id)
+        .in_("operation_type", operation_types)
+        .gte("created_at", cutoff)
+        .execute()
+    )
+    # supabase-py returns an int via res.count when count='exact'; fall back to
+    # row length otherwise (and stay robust to test mocks where count is a Mock).
+    count = getattr(res, "count", None)
+    if isinstance(count, int):
+        return count
+    return len(getattr(res, "data", None) or [])
 
 
 def _scrub_uuids(value: Any) -> Any:
